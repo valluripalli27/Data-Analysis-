@@ -1,0 +1,189 @@
+from datetime import datetime
+import argparse
+import tweepy
+from tweepy import OAuthHandler
+from textblob import TextBlob
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.neural_network import MLPClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import confusion_matrix
+
+# Custom utility functions (make sure these are defined in utils.py)
+from utils import clean_tweet, get_tag, get_target_vec, get_class, save_confusion_matrix
+
+class TweetCollector:
+    def collect_tweets(self, search_term, count, output_folder, timestamp):
+        '''
+        Fetches tweets from Twitter for the given search_term
+        Saves the output in the output_folder
+        '''
+        print(f'Search term: {search_term}, Count: {count}')
+        consumer_key = "VdmUKOxOdteykWlZJARYVudRu"
+        consumer_secret = "FfmYXYuIuJkdgOgyN9QRzwCjyFDAeiyeOdWlTV2LDGNwTQNPrD"
+        access_token = "952048695100387328-Riem8smmvbqg1yjECf2PjNec83VTFcO"
+        access_token_secret = "3Y7xxlU1gTa6Rzi5rRP26j9UAL9FQ54P0KtNFoiXoheyD"
+
+        auth = OAuthHandler(consumer_key, consumer_secret)
+        auth.set_access_token(access_token, access_token_secret)
+        api = tweepy.API(auth)
+
+        print('Fetching tweets from Twitter...')
+        tweets = api.search(q=search_term, count=count)
+
+        print('Creating necessary output folder...')
+        if not os.path.exists(output_folder):
+            os.mkdir(output_folder)
+
+        tweets_file_name = f'{output_folder}/tagged_tweets_{search_term.replace(" ", "_")}_{timestamp}.txt'
+        print(f'Saving tagged tweets to {tweets_file_name}...')
+        input_file = open(tweets_file_name, 'w')
+        tag_count = {"POS": 0, "NEU": 0, "NEG": 0}
+
+        for tweet in tweets:
+            cleaned_tweet = clean_tweet(tweet.text)
+            analysis = TextBlob(cleaned_tweet)
+            tag = get_tag(analysis.sentiment.polarity)
+            tag_count[tag] += 1
+            input_file.write(cleaned_tweet + "," + tag + "\n")
+            input_file.flush()
+        input_file.close()
+
+        print('Input file is generated with the following distribution.')
+        print(f'Positive: {tag_count["POS"]}, Neutral: {tag_count["NEU"]}, Negative: {tag_count["NEG"]}')
+
+        # Sentiment distribution graph
+        x = [1, 2, 3]
+        fig, ax = plt.subplots()
+        ax.set_title(f'Sentiment distribution\n Search term: {search_term}, Count: {count}')
+        ax.set_xticks(x)
+        ax.set_xticklabels(['Positive', 'Neutral', 'Negative'])
+        ax.bar(x, [tag_count["POS"], tag_count["NEU"], tag_count["NEG"]], 0.5)
+        file_name = f'{output_folder}/sentiment_dist_{search_term.replace(" ", "_")}_{timestamp}.png'
+
+        print(f'Saving sentiment distribution to {file_name}...')
+        plt.savefig(file_name)
+        plt.close()
+        print('Distribution is saved')
+        return tweets_file_name
+
+class VectorGenerator:
+    def __init__(self, tweets_file_name):
+        self.tweets_file_name = tweets_file_name
+        self.bag_of_words = set()
+        self.lines = []
+
+    def construct_bag_of_words(self):
+        '''Constructs bag of words from the tweets.'''
+        print(f'Tweets file name: {self.tweets_file_name}')
+        file = open(self.tweets_file_name, 'r')
+        self.lines = file.readlines()
+        for line in self.lines:
+            tweet = line.split(',')[0]
+            for word in tweet.split():
+                self.bag_of_words.add(word.lower())
+        file.close()
+        print(f'{len(self.lines)} tweets parsed...')
+        print(f'Bag-of-words is constructed with {len(self.bag_of_words)} words')
+        self.bag_of_words = sorted(self.bag_of_words)
+
+        # Save bag-of-words to file
+        filename = self.tweets_file_name.replace('tagged_tweets', 'bag_of_words')
+        with open(filename, 'w') as file:
+            file.write(', '.join(self.bag_of_words))
+            file.flush()
+        print(f'Saved bag-of-words to {filename}')
+
+    def generate_vectors(self):
+        '''Generates feature vectors and target vectors.'''
+        print('Formulating feature vectors...')
+        vec_length = len(self.bag_of_words)
+        filename = self.tweets_file_name.replace('tagged_tweets', 'vectors')
+
+        with open(filename, 'w') as file:
+            for line in self.lines:
+                feature_vector = [0] * vec_length
+                tweet_with_tag = line.strip().split(',')
+                tweet_words = tweet_with_tag[0].lower().split()
+                target_vector = get_target_vec(tweet_with_tag[1])
+                for i, word in enumerate(self.bag_of_words):
+                    if word in tweet_words:
+                        feature_vector[i] = 1
+                file.write(','.join(str(x) for x in feature_vector) + "," + target_vector + "\n")
+                file.flush()
+        print(f'Saved feature vectors and target vectors to {filename}')
+        return filename
+
+class Classifier:
+    def __init__(self, vectors_file_name):
+        '''Initializes the members of this class.'''
+        self.features = []
+        self.targets = []
+        self.accuracy = 0
+        self.cnf_matrix = np.array([])
+        self.vectors_file_name = vectors_file_name
+
+    def load_vectors(self):
+        '''Loads feature vectors and target vectors from the file.'''
+        print(f'Vectors file name: {self.vectors_file_name}')
+        with open(self.vectors_file_name, 'r') as file:
+            lines = file.readlines()
+            for line in lines:
+                l = line.strip().split(',')
+                l = [int(i) for i in l]
+                self.features.append(l[:-3])
+                self.targets.append(l[-3:])
+
+    def train_and_test(self, num_runs=1, test_size=0.3):
+        '''Trains the neural network with the training set and tests the performance with the test set.'''
+        for r in range(num_runs):
+            X_train, X_test, y_train, y_test = train_test_split(
+                np.array(self.features), np.array(self.targets),
+                test_size=test_size
+            )
+            clf = MLPClassifier(solver='lbfgs', alpha=1e-5, hidden_layer_sizes=(10, 5), random_state=1)
+            clf.fit(X_train, y_train)
+            y_pred = clf.predict(X_test)
+            y_pred_class = [get_class(y) for y in y_pred]
+            y_test_class = [get_class(y) for y in y_test]
+            correct = sum(y_pred_class[i] == y_test_class[i] for i in range(len(X_test)))
+            total = len(X_test)
+
+            print(f"Train and test run: {r + 1}")
+            print(f"Total: {total}, Correct: {correct}, Incorrect: {total - correct}")
+            current_accuracy = correct * 100.0 / total
+            print(f"Accuracy is {current_accuracy:.2f} percent")
+            if current_accuracy > self.accuracy:
+                self.accuracy = current_accuracy
+                self.cnf_matrix = confusion_matrix(y_test_class, y_pred_class)
+                save_confusion_matrix(self.cnf_matrix, self.vectors_file_name, self.accuracy)
+
+def main(search_term, count):
+    print('################################################################')
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_folder = f'output_{timestamp}'
+    tweet_collector = TweetCollector()
+    tweets_file_name = tweet_collector.collect_tweets(search_term, count, output_folder, timestamp)
+
+    vector_generator = VectorGenerator(tweets_file_name)
+    vector_generator.construct_bag_of_words()
+    vectors_file_name = vector_generator.generate_vectors()
+
+    classifier = Classifier(vectors_file_name)
+    classifier.load_vectors()
+    classifier.train_and_test(5, 0.3)
+    print('################################################################')
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-s', '--search', dest='search_term', type=str, help='Search term')
+    parser.add_argument('-c', '--count', dest='count', type=int, default=100, help='Count')
+    args = parser.parse_args()
+    search_term = args.search_term
+    count = args.count
+    if search_term is None:
+        print('Argument(s) is/are invalid')
+        exit()
+    main(search_term, count)
+    
